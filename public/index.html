@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f8fc" />
+    <title>信用卡欺诈监测 Agent</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="app-head">
+      <div class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l7 2.8v5.4c0 4.6-3 8.3-7 9.8-4-1.5-7-5.2-7-9.8V5.8z" fill="rgba(255,255,255,.16)" stroke-width="1.6" />
+              <path d="M9.2 12.1l2.1 2.1 3.8-4.2" />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <h1>信用卡欺诈监测 Agent</h1>
+            <p class="brand-sub">大模型核心判定 · 字段自动补全 · 规则作为 Agent 工具</p>
+          </div>
+        </div>
+        <div class="meta">
+          <span id="llmStatus" class="badge">读取中</span>
+          <span id="modelBadge" class="badge muted">模型</span>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button id="tabInput" class="tab active" role="tab" aria-selected="true">录入判定</button>
+        <button id="tabAssets" class="tab" role="tab" aria-selected="false">规则与数据</button>
+      </div>
+    </header>
+
+    <main id="inputView" class="page">
+      <section class="split">
+        <section class="panel input-panel">
+          <div class="panel-head">
+            <h2>用户输入</h2>
+            <span class="hint">事实字段手填，ID 可输入可选候选</span>
+          </div>
+          <form id="evalForm" class="grid">
+            <label class="wide">
+              <span>客户ID</span>
+              <input name="客户ID" type="text" list="customerIdList" autocomplete="off" spellcheck="false" placeholder="输入或选择，如 CUS01001" />
+              <small class="field-hint" id="customerIdHint">留空则无法补全客户画像</small>
+            </label>
+            <label class="wide">
+              <span>交易ID</span>
+              <input name="交易ID" type="text" list="transactionIdList" autocomplete="off" spellcheck="false" placeholder="输入或选择，留空表示新建交易" />
+              <small class="field-hint" id="transactionIdHint">留空表示新建交易；候选默认只列待判定样例</small>
+            </label>
+            <label class="wide">
+              <span>商户名称</span>
+              <input name="商户名称" type="text" list="merchantNameList" autocomplete="off" spellcheck="false" placeholder="输入或选择商户" />
+              <small class="field-hint" id="merchantNameHint">商户MCC、是否高风险、商户城市由商户表带出</small>
+            </label>
+            <label>
+              <span>交易金额</span>
+              <input name="交易金额" type="number" min="0" step="0.01" />
+            </label>
+            <label>
+              <span>交易时间</span>
+              <input name="交易时间" type="text" placeholder="2026-09-02 02:07:00" />
+            </label>
+            <label>
+              <span>交易渠道</span>
+              <select name="交易渠道">
+                <option value="">请选择</option>
+                <option>线上无卡</option>
+                <option>POS</option>
+                <option>ATM</option>
+                <option>其他</option>
+              </select>
+            </label>
+            <label>
+              <span>交易类型</span>
+              <select name="交易类型">
+                <option value="">请选择</option>
+                <option>消费</option>
+                <option>转账/支付</option>
+                <option>取现</option>
+                <option>其他</option>
+              </select>
+            </label>
+            <datalist id="customerIdList"></datalist>
+            <datalist id="transactionIdList"></datalist>
+            <datalist id="merchantNameList"></datalist>
+          </form>
+          <div class="actions">
+            <button type="button" id="clearBtn" class="secondary">清空</button>
+            <button type="submit" form="evalForm" id="submitBtn" class="primary">LLM 最终判定</button>
+          </div>
+        </section>
+
+        <section class="panel auto-panel">
+          <div class="panel-head">
+            <h2>系统自动补全</h2>
+            <span class="hint">客户表 / 商户表 / 特征计算 / 风控模型</span>
+          </div>
+          <div id="prepStatus" class="prep-status">等待输入客户ID或交易ID</div>
+          <div class="auto-groups">
+            <div class="auto-group">
+              <h3>客户画像 <em>客户表</em></h3>
+              <div id="customerFields" class="kv-grid"><div class="kv empty"><span class="k">等待输入</span><span class="v">—</span></div></div>
+            </div>
+            <div class="auto-group">
+              <h3>商户信息 <em>商户表</em></h3>
+              <div id="merchantFields" class="kv-grid"><div class="kv empty"><span class="k">等待输入</span><span class="v">—</span></div></div>
+            </div>
+            <div class="auto-group">
+              <h3>客户交易映射 <em>映射表</em></h3>
+              <div id="txnMapFields" class="kv-grid"><div class="kv empty"><span class="k">等待输入</span><span class="v">—</span></div></div>
+            </div>
+            <div class="auto-group">
+              <h3>系统计算特征 <em>自动计算 / 不可编辑</em></h3>
+              <div id="featureFields" class="kv-grid"><div class="kv empty"><span class="k">等待输入</span><span class="v">—</span></div></div>
+            </div>
+            <div class="auto-group">
+              <h3>风险模型输出 <em>模型接口 / 不可手填</em></h3>
+              <div id="riskFields" class="kv-grid"><div class="kv empty"><span class="k">等待输入</span><span class="v">—</span></div></div>
+            </div>
+            <div id="missingBox" class="missing hidden"></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="panel-head">
+          <h2>判定结果</h2>
+          <span class="hint">点「LLM 最终判定」后显示</span>
+        </div>
+        <div id="resultArea" class="result-empty">等待输入</div>
+      </section>
+    </main>
+
+    <section id="assetsView" class="panel hidden">
+      <div class="asset-grid">
+        <div class="asset">
+          <div class="panel-head"><h2>业务规则</h2><code id="rulesPath"></code></div>
+          <textarea id="rulesText" readonly="true" spellcheck="false"></textarea>
+        </div>
+        <div class="asset">
+          <div class="panel-head"><h2>提示词模板</h2><code id="templatePath"></code></div>
+          <textarea id="templateText" readonly="true" spellcheck="false"></textarea>
+        </div>
+        <div class="asset">
+          <div class="panel-head"><h2>连接表文件</h2></div>
+          <p class="table-note hidden" id="tableCounts"></p>
+          <pre id="tableSources"></pre>
+        </div>
+      </div>
+    </section>
+
+    <footer class="app-foot">演示环境 · 交易与客户数据均为模拟数据 · 判定结果供风控参考</footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
