@@ -484,9 +484,8 @@ def build_prompt(context, template_file=TEMPLATE_FILE):
     return {"system": system_text, "user": user_text, "text": full.strip()}
 
 
-# 简化版 LLM 终判 prompt：字段说明 + 已判定规则 + 判定逻辑 + 字段值 → 结果。
-# 规则引擎已经把每条规则的命中情况算好，LLM 只需要在此基础上结合判定逻辑给最终结论，
-# 不再塞历史交易明细、完整业务规则文档和上下文大表，避免 prompt 冗长。
+# 简化版 LLM 终判 prompt：字段说明 + 业务规则全文 + 字段值。
+# 命中与否由大模型对照规则自行判断，不把规则引擎的预判结果写进提示词。
 SIMPLIFIED_FIELD_DICT = {
     "客户ID": "客户唯一标识",
     "交易ID": "交易唯一标识",
@@ -541,45 +540,48 @@ def collect_judge_values(context):
     return values
 
 
-def build_simplified_prompt(context, rule_decision):
-    """简化版 LLM 终判 prompt：字段说明 + 规则引擎预判结果 + 判定逻辑 + 字段值 + 输出要求。"""
+def build_simplified_prompt(context):
+    """简化版 LLM 终判 prompt：字段说明 + 业务规则全文 + 字段值 + 输出要求。"""
     values = collect_judge_values(context)
     field_intro = "\n".join(f"- {k}: {SIMPLIFIED_FIELD_DICT[k]}"
                             for k in SIMPLIFIED_FIELD_DICT if k in values) or "(无)"
-
-    rd = rule_decision or {}
-    rule_block = [
-        f"- 规则独立判定（不看模型分）: {rd.get('rule_only_level', '') or '—'}",
-        f"- 规则引擎最终等级: {rd.get('risk_level', '') or '—'}",
-        f"- 命中规则: {', '.join(rd.get('rules_hit', [])) or '无'}",
-        f"- 建议动作: {rd.get('action', '') or '—'}",
-        "",
-        "逐条核对:",
-    ]
-    for line in rd.get("rule_check", []):
-        rule_block.append(f"  - {line}")
-    rule_text = "\n".join(rule_block)
-
     logic = read_file(RULES_FILE)
     value_lines = "\n".join(f"- {k}: {v}" for k, v in values.items()) or "(无)"
 
-    user_text = (
-        "## 字段说明\n" + field_intro + "\n\n"
-        "## 规则引擎预判结果（已判定好的规则，仅供参考，可调整）\n" + rule_text + "\n\n"
-        "## 业务规则全文\n" + logic + "\n\n"
-        "## 待判定交易字段值\n" + value_lines + "\n\n"
-        "## 输出要求\n"
-        "基于字段值和规则引擎预判结果，按判定逻辑给出最终风险判定。"
-        "如果认同规则引擎结论可直接复用；如有分歧须写明分歧来源。"
-        "输出 JSON，字段：risk_level（高/中/低/数据不完整）、rule_only_level、"
-        "rule_check（逐条核对列表）、rules_hit、reasons、evidence_fields、"
-        "disconfirming_evidence、confidence（0-1）、verdict、action、"
-        "requires_human_review、customer_facing_note。只输出 JSON，不要解释。"
-    )
-    system_text = (
-        "你是信用卡欺诈监测风控判定助手。规则引擎已基于事实字段给出每条规则的命中情况，"
-        "你需要在此基础上结合判定逻辑给出最终风险判定。只输出 JSON。"
-    )
+    template = read_file(TEMPLATE_FILE)
+    slots = {
+        "field_intro": field_intro,
+        "field_values": value_lines,
+        "business_rules": logic,
+    }
+    # 业务规则放最后替换，避免规则正文里碰巧出现占位符被再次展开。
+    if template and all("{{" + key + "}}" in template for key in slots):
+        full = template
+        for key in ("field_intro", "field_values", "business_rules"):
+            full = full.replace("{{" + key + "}}", slots[key])
+        system_text, user_text = split_system_user(full)
+    else:
+        user_text = (
+            "## 业务规则全文\n" + logic + "\n\n"
+            "## 字段说明\n" + field_intro + "\n\n"
+            "## 待判定交易字段值\n" + value_lines + "\n\n"
+            "## 输出要求\n"
+            "根据业务规则逐条对照字段值自行判定。先给出不看模型分的 rule_only_level，"
+            "再结合模型分给出最终 risk_level；两步不一致时写明分歧来源。"
+            "输出 JSON，字段：risk_level（高/中/低/数据不完整）、rule_only_level、"
+            "rule_check（逐条核对列表）、rules_hit、reasons、evidence_fields、"
+            "disconfirming_evidence、confidence（0-1）、verdict、action、"
+            "requires_human_review、customer_facing_note。只输出 JSON，不要解释。"
+        )
+        system_text = (
+            "你是信用卡欺诈监测风控判定助手。请只依据业务规则和待判定交易的事实字段自行完成风险判定。"
+            "没有预先算好的规则结论，不要假设某条规则已经命中或未命中。只输出 JSON。"
+        )
+    if not system_text:
+        system_text = (
+            "你是信用卡欺诈监测风控判定助手。请只依据业务规则和待判定交易的事实字段自行完成风险判定。"
+            "没有预先算好的规则结论，不要假设某条规则已经命中或未命中。只输出 JSON。"
+        )
     return {"system": system_text, "user": user_text, "text": user_text}
 
 
@@ -902,25 +904,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "not found"}, status=404)
         try:
             context = prepare_context(payload.get("input", payload))
-            # 规则引擎做确定性预判，/api/evaluate 就到这里，字段填完自动出结果。
-            rule_decision = evaluate_rule_engine(context)
+            # /api/evaluate 只给离线对照用，页面终判不走这里。
             if route == "/api/evaluate":
+                rule_decision = evaluate_rule_engine(context)
                 append_log(context, None, "rules", None, rule_decision, None)
                 return self.send_json({"mode": "rules", "decision": rule_decision,
                                        "context": context, "error": None})
-            # /api/llm_judge：用简化版 prompt 把规则预判结果交给 LLM 做最终判定。
-            prompt = build_simplified_prompt(context, rule_decision)
+            # /api/llm_judge：大模型对照业务规则和字段自行判定，不注入规则引擎预判。
+            prompt = build_simplified_prompt(context)
             mode, raw_content, error = call_llm(prompt["user"], prompt["system"])
-            if mode == "error":
+            if mode == "error" or not raw_content:
                 decision = {"risk_level": "无法判定", "verdict": "调用大模型接口失败，转人工处理。",
-                            "action": "人工复核", "rules_hit": rule_decision.get("rules_hit", []),
-                            "reasons": [f"接口错误：{error}"], "evidence_fields": [],
+                            "action": "人工复核", "rules_hit": [],
+                            "reasons": [f"接口错误：{error or '模型未返回内容'}"], "evidence_fields": [],
                             "requires_human_review": True,
                             "customer_facing_note": "系统暂无法自动判定，请配合进一步核验。"}
             else:
-                decision = parse_decision(raw_content) if raw_content else rule_decision
+                decision = parse_decision(raw_content)
             append_log(context, prompt, mode, raw_content, decision, error)
-            return self.send_json({"mode": mode, "decision": decision, "rule_decision": rule_decision,
+            return self.send_json({"mode": mode, "decision": decision,
                                    "context": context, "error": error})
         except Exception as exc:
             import traceback

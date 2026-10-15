@@ -64,12 +64,12 @@ function isKnownTransaction(value) {
 }
 
 function setStatus() {
-  // 判定改为纯代码规则引擎，不再依赖大模型，状态徽标固定为规则引擎。
   const statusEl = document.getElementById("llmStatus");
   const modelEl = document.getElementById("modelBadge");
-  statusEl.textContent = "规则引擎";
-  statusEl.className = "badge ok";
-  modelEl.textContent = "代码判定";
+  const configured = !!state.config?.llmConfigured;
+  statusEl.textContent = configured ? "大模型已连接" : "未配置模型";
+  statusEl.className = configured ? "badge ok" : "badge";
+  modelEl.textContent = state.config?.llmModel || "未配置";
 }
 
 function fillDatalist(id, values) {
